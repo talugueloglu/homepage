@@ -27,7 +27,7 @@
   const accept=t=>t<=0?0:Math.min(1,Math.pow(t,1.15)*.95);
   const COS=new Float32Array(NA),SIN=new Float32Array(NA);for(let a=0;a<NA;a++){COS[a]=Math.cos(a/NA*TAU);SIN[a]=Math.sin(a/NA*TAU);}
 
-  let W=0,H=0,DH=0,CT=0,CH=0,dpr=1,size=60,colors={},time=0,last=0,frameNo=0,paused=false,started=false;
+  let W=0,H=0,DH=0,CT=0,CH=0,dpr=1,dpr0=1,size=60,colors={},time=0,last=0,frameNo=0,paused=false,started=false;
   let cells=[],pool=[],events=[],fading=[],procs=[],box=null,gpu=null,table=null,lam=1,beat=0,baseCount=0,nextEvent=3,lastEvent='ext';
   const scrollY=()=>window.scrollY||0;
   const readColors=()=>{const s=getComputedStyle(document.documentElement),g=n=>s.getPropertyValue(n).trim();colors={paper:g('--paper'),ink:g('--dot-ink'),dna:g('--dot-dna'),lyso:g('--dot-lyso')};};
@@ -207,7 +207,7 @@
   // the border, so they follow the cell's shape. Round organelles (type 3) are stored
   // in units of the cell's inner radius, so they stay round and stay inside. Nucleus
   // dots (type 2) are in units of the nucleus radius.
-  const DENS=.58;
+  const DENS=.58,BUDGET=560000;
   function kit(c,out){
     const id=c.id,put=(A,B,C,D,type,ink,sz,E=0)=>{out.push(A,B,C,D,id,type*4+ink,sz,E);};
     const polar=(x,y,ink,sz,type=4)=>{const r=Math.hypot(x,y);if(r>.985)return;let t=Math.atan2(y,x)/TAU*NA;if(t<0)t+=NA;put(t,r,Math.random(),0,type,ink,sz);};
@@ -300,12 +300,15 @@
         for(let j=0,m=Math.round(len*ref*1.8);j<m;j++){const t=Math.random(),rho=.975-len*t;polar(Math.cos(a+lean*t)*rho,Math.sin(a+lean*t)*rho,0,rand(.5,.72));}}
     }
     // Cilia are redrawn each frame as they beat: store each one's root and character.
-    if(kind==='ciliated'){const m=Math.round(ref*ref*.05),s=c.cilia=new Float32Array(m*5);
+    if(kind==='ciliated'){const m=Math.round(Math.min(ref*ref*.05,190+ref)),s=c.cilia=new Float32Array(m*5);
       for(let i=0;i<m;i++){const a=Math.random()*TAU,d=Math.sqrt(Math.random())*.82;s[i*5]=((a/TAU*NA)%NA+NA)%NA;s[i*5+1]=d;s[i*5+2]=rand(-.3,.3);s[i*5+3]=rand(.22,.34);s[i*5+4]=rand(-.5,.5);}}
   }
 
   // ---- growing a tissue --------------------------------------------------------------------
-  function build(){
+  // The dots are made a few cells at a time between frames, so the page never freezes
+  // while a tissue grows. `ready` is false until the last cell is done.
+  let ready=false,buildNo=0;
+  function build(done){
     size=Math.max(50,Math.min(W,H)/10);measure();cap=planCap();dirty=true;table=null;openingTransition=null;cells=[];pool=[];events=[];fading=[];procs=[];vmap=new Map();vcount=0;time=0;frameNo=0;beat=rand(0,TAU);nextEvent=2.5;lastEvent='ext';
     const near=(x,y,m)=>box&&x>box.l-m&&x<box.r+m&&y>box.t-m&&y<box.b+m;
     // Scatter cell centres, none too close together and none inside the text opening.
@@ -326,17 +329,33 @@
     for(let i=0;i<46;i++)mechanics(.06,true);
     // Each cell gets enough dots for the largest it is likely to become.
     const unit=lam;for(const c of cells)c.refR=1.35*Math.sqrt(c.share0*unit/Math.PI);
-    const out=[];for(const c of cells)kit(c,out);if(cap)wall(out);
-    table=new Float32Array(TW*cells.length);for(const c of cells)row(c);
-    route();dyn();
-    if(gpu)upload(new Float32Array(out));else still=new Float32Array(out);
+    // A large screen would need over a million dots. Past a budget, a share is left out
+    // at random and the rest drawn slightly larger, so the tone stays the same.
+    const keep=Math.min(1,BUDGET/(.32*W*DH)),out={a:new Float32Array(1<<21),n:0,g:Math.pow(keep,-.4),
+      push(x,y,c,d,e,f,s,h){if(keep<1&&Math.random()>keep)return;if(this.n+8>this.a.length){const b=new Float32Array(this.a.length*2);b.set(this.a);this.a=b;}
+        const a=this.a,n=this.n;a[n]=x;a[n+1]=y;a[n+2]=c;a[n+3]=d;a[n+4]=e;a[n+5]=f;a[n+6]=s*this.g;a[n+7]=h;this.n=n+8;}};
+    const job=++buildNo,list=cells;let i=0;ready=false;
+    const step=()=>{
+      if(job!==buildNo)return;
+      try{
+        const t=performance.now();while(i<list.length&&performance.now()-t<12)kit(list[i++],out);
+        if(i<list.length){const ch=new MessageChannel();ch.port1.onmessage=step;ch.port2.postMessage(0);return;}
+        if(cap)wall(out);const dots=out.a.slice(0,out.n);
+        table=new Float32Array(TW*cells.length);for(const c of cells)row(c);
+        route();ready=true;dyn();
+        if(gpu)upload(dots);else still=dots;
+        stillAt=-1;dirty=true;
+      }catch(err){console.error(err);ready=true;}
+      if(done)done();
+    };
+    step();
   }
 
   // ---- mechanics ------------------------------------------------------------------------------
   const active=[];
   function mechanics(dt,all){
     frameNo++;if(vcount>60000){vmap=new Map();vcount=0;}
-    const top=CT-size*3,bot=CT+CH+size*3,edge=size*.5;active.length=0;
+    const top=scrollY()-size*3,bot=scrollY()+H+size*3,edge=size*.5;active.length=0;
     for(const c of cells){
       if(c.free||(!all&&(c.y<top||c.y>bot)))continue;active.push(c);
       const roam=KIND[c.kind].roam;
@@ -444,7 +463,7 @@
   const dot=(x,y,sz,ink)=>{if(dynCount>=DYN_MAX||sz<.05)return;const o=dynCount++*STRIDE;DYN[o]=x;DYN[o+1]=y;DYN[o+5]=20+ink;DYN[o+6]=sz;};
   const look=(c,t)=>{const k=t|0;return c.R[k]+(c.R[k+1]-c.R[k])*(t-k);};
   function dyn(){
-    dynCount=0;const top=CT-size,bot=CT+CH+size,cb=Math.cos(beat),sb=Math.sin(beat);
+    dynCount=0;const near=tick>0?H*.25:1e9,top=Math.max(CT,scrollY()-near)-size,bot=Math.min(CT+CH,scrollY()+H+near)+size,cb=Math.cos(beat),sb=Math.sin(beat);
     // Red blood cells, single file, tumbling like coins and surging with each heartbeat.
     if(cap){const L=cap.t1-cap.t0,p=Math.sin(time*5.4);cap.flow+=tick*cap.speed*(.7+.8*(p>0?p*p*p:0));
       for(const b of cap.rbc){const t=cap.t0+(((b.s+cap.dir*cap.flow)%L)+L)%L,s=capD(t),q=capF(t)+b.off,x=cap.v?q:t,y=cap.v?t:q;if(y<top||y>bot||x<-size||x>W+size)continue;
@@ -630,6 +649,7 @@
   }
   function frame(now){
     const dt=Math.min(.05,(now-(last||now))/1000);last=now;
+    if(!ready){requestAnimationFrame(frame);return;}
     place();const run=!paused&&!reduce.matches&&gpu;let openingChanged=false;
     try{openingChanged=advanceOpening();}catch(err){console.error(err);}
     // Standing still (paused, or reduced motion): draw only when something changed.
@@ -640,9 +660,11 @@
   // The canvas is taller than the screen and lies in the page, so the browser scrolls the
   // drawing and the text together and they can never slip apart. CT is where its top sits
   // on the page and CH its height; it is moved along only as the screen nears its edge.
-  const sheet=canvas.parentElement,room=()=>Math.min(H*.5,600);
+  const sheet=canvas.parentElement,room=()=>Math.min(H*.25,320);
   function tall(){const most=Math.max(H,Math.floor(4096/dpr));return Math.max(1,Math.min(Math.ceil(H+2*room()),most,Math.max(H,sheet.clientHeight)));}
-  function fit(){dpr=Math.min(2,devicePixelRatio||1);CH=tall();canvas.width=Math.round(W*dpr);canvas.height=Math.round(CH*dpr);canvas.style.height=CH+'px';stillAt=-1;place(true);}
+  function fit(){dpr0=devicePixelRatio||1;dpr=Math.min(2,dpr0);CH=tall();
+    // A sharp screen is drawn at up to twice its size, but never more than about 4.5 million pixels in all.
+    dpr=Math.min(dpr,Math.max(1,Math.sqrt(4.5e6/Math.max(1,W*CH))));canvas.width=Math.round(W*dpr);canvas.height=Math.round(CH*dpr);canvas.style.height=CH+'px';stillAt=-1;place(true);}
   function place(now){
     if(!now&&tall()!==CH){fit();return;}
     const off=sheet.getBoundingClientRect().top+scrollY(),lo=off,hi=off+Math.max(0,sheet.clientHeight-CH),want=clamp(scrollY()-(CH-H)/2,lo,hi);
@@ -651,10 +673,10 @@
   // The size the tissue was grown for, and where the text stood then.
   let Wb=0,Hb=0,textTop=0,pageHeight=0,shiftX=0,pending=0,hiding=false,force=false;
   const textAt=()=>{const el=document.querySelector('#text .socials')||document.querySelector('#text .portrait')||document.querySelector('#text h1');return el?el.getBoundingClientRect().top+scrollY():0;};
-  function grow(){
+  function grow(done){
     W=sheet.clientWidth;H=innerHeight;fit();DH=Math.max(H,document.documentElement.scrollHeight);Wb=W;Hb=H;shiftX=0;textTop=textAt();pageHeight=DH;force=false;readColors();
     if(gl&&!gpu)try{setupGPU();}catch(err){console.error(err);gpu=null;}
-    try{build();}catch(err){console.error(err);}
+    try{build(done);}catch(err){console.error(err);ready=true;if(done)done();}
     dirty=true;if(!started){started=true;requestAnimationFrame(frame);}
   }
   // While the window is being resized the canvas always matches it, so the drawing is
@@ -662,26 +684,26 @@
   // is grown once the resizing has stopped.
   function resize(){
     const w=sheet.clientWidth,h=innerHeight;if(w<50||h<50)return;
-    if(!cells.length){grow();return;}
+    if(!cells.length){hiding=true;canvas.style.transition='none';canvas.style.opacity=0;void canvas.offsetWidth;canvas.style.transition='';grow(()=>{hiding=false;show();});return;}
     const dh=Math.max(h,document.documentElement.scrollHeight);
     // A phone's address bar changes the height constantly; only a real change regrows the tissue.
     const regrow=force||w!==Wb||Math.abs(dh-pageHeight)>size||Math.abs(h-Hb)>Math.max(160,Hb*.25)||Math.abs(textAt()-textTop)>3;
-    if(w!==W||h!==H||dpr!==Math.min(2,devicePixelRatio||1)){W=w;H=h;fit();shiftX=(W-Wb)/2;dirty=true;try{dyn();draw();}catch(err){console.error(err);}}
+    if(w!==W||h!==H||dpr0!==(devicePixelRatio||1)){W=w;H=h;fit();shiftX=(W-Wb)/2;dirty=true;if(ready)try{dyn();draw();}catch(err){console.error(err);}}
     clearTimeout(pending);
-    if(!regrow){if(hiding){hiding=false;show();}return;}
+    if(!regrow){if(hiding&&ready){hiding=false;show();}return;}
     regrowSoon();
   }
   // The canvas fades quickly for a regrowth; afterwards the stylesheet's own pace returns.
   let easing=0;
   const hide=()=>{clearTimeout(easing);canvas.style.transition='opacity .22s';canvas.style.opacity=0;};
   const show=()=>{canvas.style.opacity='';clearTimeout(easing);easing=setTimeout(()=>{canvas.style.transition='';},320);};
-  function regrowSoon(){hiding=true;hide();clearTimeout(pending);pending=setTimeout(()=>{grow();hiding=false;show();},reduce.matches?120:280);}
+  function regrowSoon(){hiding=true;hide();clearTimeout(pending);pending=setTimeout(()=>{grow(()=>{hiding=false;show();});},reduce.matches?120:280);}
   // A new page in place (About, Writing, a post). If the new text is about as tall as the
   // old and the capillary runs beside it, the cells stay and make room; otherwise it regrows.
   document.addEventListener('site:content-changed',()=>{
     if(!cells.length)return;
     const dh=Math.max(innerHeight,document.documentElement.scrollHeight),previous=box?{...box}:null;
-    if(hiding||!previous||dh>DH+size*.5||(cap&&!cap.v)){force=true;regrowSoon();return;}
+    if(!ready||hiding||!previous||dh>DH+size*.5||(cap&&!cap.v)){force=true;regrowSoon();return;}
     clearTimeout(pending);pageHeight=dh;textTop=textAt();measure();
     // A much taller or shorter page would leave the cells badly stretched or crushed: regrow instead.
     if(!box||Math.abs((box.b-box.t)-(previous.b-previous.t))>size*2.5){box=previous;force=true;regrowSoon();return;}
@@ -689,7 +711,7 @@
     try{mechanics(.04,true);}catch(err){console.error(err);}stillAt=-1;dirty=true;
   });
   addEventListener('resize',resize);new ResizeObserver(resize).observe(document.documentElement);
-  addEventListener('scroll',()=>{place();if(!gpu&&dirty){dyn();draw();}},{passive:true});
+  addEventListener('scroll',()=>{if(!ready)return;place();if(!gpu&&dirty){dyn();draw();}},{passive:true});
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{readColors();stillAt=-1;dirty=true;});
   if(document.fonts&&document.fonts.ready)document.fonts.ready.then(resize);
   resize();
@@ -698,7 +720,7 @@
   if(toggle){if(reduce.matches||!gl)toggle.hidden=true;toggle.addEventListener('click',()=>{paused=!paused;dirty=true;toggle.setAttribute('aria-pressed',paused);toggle.textContent=paused?'Play':'Pause';});}
   // Click an ordinary cell and it divides.
   addEventListener('click',e=>{
-    if((e.target!==canvas&&e.target.id!=='text')||paused||reduce.matches||!gpu)return;
+    if((e.target!==canvas&&e.target.id!=='text')||paused||reduce.matches||!gpu||!ready)return;
     const x=e.clientX-shiftX,y=e.clientY+scrollY();let hit=null,bd=1e18;
     for(const c of cells){if(c.free||!c.n)continue;const d=(c.x-x)**2+(c.y-y)**2-c.w;if(d<bd){bd=d;hit=c;}}
     const waiting=events.filter(v=>v.type==='div'&&!v.split).length;
