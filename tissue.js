@@ -77,7 +77,7 @@
   function measure(){
     const rows=[],sy=scrollY();
     for(const el of document.querySelectorAll('#text h1,#text h2,#text p:not(.portrait-wrap),#text li,#text .portrait,#text .socials a')){
-      if(el.classList.contains('portrait')){const r=el.getBoundingClientRect();rows.push({l:r.left,r:r.right,t:r.top+sy,b:r.bottom+sy});continue;}
+      if(el.classList.contains('portrait')||el.matches('.post-list li')){const r=el.getBoundingClientRect();rows.push({l:r.left,r:r.right,t:r.top+sy,b:r.bottom+sy});continue;}
       const rg=document.createRange();rg.selectNodeContents(el);for(const r of rg.getClientRects())if(r.width>2)rows.push({l:r.left,r:r.right,t:r.top+sy,b:r.bottom+sy});}
     if(!rows.length||document.getElementById('text').classList.contains('hidden')){box=null;return;}
     const pad=size*(W<700?.16:.3);
